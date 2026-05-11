@@ -1,0 +1,13 @@
+[package]
+name = "rust-gemma4-llama-cli"
+version = "0.2.0"
+edition = "2021"
+description = "Rust + llama-cli + Gemma 4 E4B Q4_K_M GGUF AI daily news digest with ntfy delivery"
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+feed-rs = "2.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

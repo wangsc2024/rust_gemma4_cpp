@@ -1,0 +1,23 @@
+{
+  "title": "AI 每日新聞洞察",
+  "generated_at": "2026-05-11T00:00:00Z",
+  "ntfy_topic": "https://ntfy.sh/wangsc_ainews",
+  "sent": false,
+  "items": [
+    {
+      "title": "範例：新模型發布帶動開發者工具更新",
+      "url": "https://example.com/model-update",
+      "source": "Example AI Feed",
+      "published": "2026-05-11T00:00:00Z",
+      "summary": "示範資料：正式執行 Rust news 命令時會由 RSS 內容取代。"
+    },
+    {
+      "title": "範例：企業 AI 採用從試點走向工作流整合",
+      "url": "https://example.com/enterprise-ai",
+      "source": "Example Enterprise Feed",
+      "published": "2026-05-11T01:00:00Z",
+      "summary": "示範資料：React dashboard 會讀取 latest-news.example.json 呈現洞察。"
+    }
+  ],
+  "markdown": "# AI 每日新聞洞察\n\n產生時間：2026-05-11T00:00:00Z\n\n## Gemma 4 E4B 洞察\n\n- 這是 React dashboard 的示範資料。\n- 執行 `cargo run -- news --dry-run` 會重新產生 JSON。\n- 正式排程使用本機 Gemma 4 E4B Q4_K_M GGUF 撰寫繁體中文洞察並可發送 ntfy。\n- 使用 `--resume` 可從 checkpoint 接續，避免重複發送。\n\n## 今日新聞來源\n\n- **Example AI Feed** — 2026-05-11T00:00:00Z — [範例：新模型發布帶動開發者工具更新](https://example.com/model-update)\n  - 示範資料：正式執行 Rust news 命令時會由 RSS 內容取代。"
+}
