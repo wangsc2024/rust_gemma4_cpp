@@ -1,5 +1,9 @@
 /target/
 /models/*.gguf
 /models/*.bin
+/data/ai-news/*.md
+/data/ai-news/*.log
 *.log
 .env
+/web/node_modules/
+/web/dist/
