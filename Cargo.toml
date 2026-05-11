@@ -1,0 +1,8 @@
+[package]
+name = "rust-gemma4-llama-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal Rust wrapper for llama-cli with a Gemma 4 E4B Q4_K_M GGUF model"
+license = "MIT"
+
+[dependencies]
