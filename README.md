@@ -75,6 +75,14 @@ cargo run -- news --dry-run
 - 印出即將呼叫的 `llama-cli` 命令。
 - 產生示範 Markdown 與 React JSON。
 
+### 功能確認：發一次測試新聞到 ntfy
+
+不抓 RSS、不跑模型，只把示範新聞洞察發送到 `https://ntfy.sh/wangsc_ainews`，用來確認 ntfy、網路與輸出檔案可用：
+
+```bash
+cargo run -- news --test-send
+```
+
 ### 正式產生洞察，但不發送 ntfy
 
 ```bash
@@ -84,8 +92,10 @@ cargo run -- news --no-send --gpu-layers 99
 ### 正式產生洞察並發送 ntfy.sh/wangsc_ainews
 
 ```bash
-cargo run -- news --send --gpu-layers 99
+cargo run -- news --resume --send --gpu-layers 99
 ```
+
+`--resume` 會從 `data/ai-news/checkpoint.json` 接續，若先前已完成發送，會避免重複推播；需要完全重跑時加 `--force`。
 
 或使用腳本：
 
@@ -139,6 +149,10 @@ npm run build
 | `--days <n>` | 收集最近幾天新聞，預設 `2`。 |
 | `--output-md <path>` | Markdown 輸出，預設 `data/ai-news/latest.md`。 |
 | `--output-json <path>` | React JSON 輸出，預設 `web/public/latest-news.example.json`。 |
+| `--checkpoint <path>` | 斷點檔路徑，預設 `data/ai-news/checkpoint.json`。 |
+| `--resume` | 從斷點接續，並避免已送出的內容重複發送。 |
+| `--force` | 忽略舊斷點，重新建立新聞流程。 |
+| `--test-send` | 發一次示範新聞到 ntfy，不抓 RSS、不跑模型。 |
 | `--ntfy-topic <url>` | ntfy topic，預設 `https://ntfy.sh/wangsc_ainews`。 |
 | `--send` | 發送到 ntfy。 |
 
@@ -150,6 +164,11 @@ npm run build
 
 - `data/ai-news/latest.md`：人類可讀的 Markdown 洞察。
 - `web/public/latest-news.example.json`：React dashboard 使用的 JSON。
+- `data/ai-news/checkpoint.json`：工作流斷點，記錄收集、prompt、生成、寫檔、發送狀態。
+
+## 工作流閉環與斷點
+
+新聞工作流會依序記錄：`started → collected → prompted → generated → rendered → written → sent → completed`。任一步驟失敗會寫入 `failed` 與錯誤訊息；下次使用 `--resume` 可從已完成的資料接續，降低 RSS 或模型執行中斷後重做成本。若需要忽略斷點，使用 `--force`。
 
 ## 安全與隱私
 

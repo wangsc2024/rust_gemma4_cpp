@@ -21,6 +21,7 @@
 - ntfy.sh 發送。
 - React dashboard。
 - cron 安裝腳本。
+- 斷點檔與 resume/force/test-send 工作流閉環。
 
 ### 不包含
 
@@ -36,3 +37,5 @@
 3. `cargo run -- news --send` 在模型與網路可用時，必須收集新聞、生成洞察並發送到 `https://ntfy.sh/wangsc_ainews`。
 4. React dashboard 必須能讀取 `web/public/latest-news.example.json`。
 5. README 必須說明每日排程、ntfy topic、模型設定與 React 使用方式。
+6. `cargo run -- news --test-send` 必須能不依賴模型發送一次示範新聞以確認 ntfy 功能。
+7. `--resume` 必須能讀取斷點並避免重複發送已送出的新聞。

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use feed_rs::model::Entry;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
@@ -15,6 +15,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = "你是精準、簡潔且使用繁體中文�
 const DEFAULT_NTFY_TOPIC: &str = "https://ntfy.sh/wangsc_ainews";
 const DEFAULT_NEWS_OUTPUT_MD: &str = "data/ai-news/latest.md";
 const DEFAULT_NEWS_OUTPUT_JSON: &str = "web/public/latest-news.example.json";
+const DEFAULT_NEWS_CHECKPOINT: &str = "data/ai-news/checkpoint.json";
 const DEFAULT_NEWS_DAYS: i64 = 2;
 const DEFAULT_NEWS_MAX_ITEMS: usize = 12;
 const DEFAULT_FEEDS: &[&str] = &[
@@ -76,7 +77,11 @@ struct NewsConfig {
     output_md: PathBuf,
     output_json: PathBuf,
     ntfy_topic: String,
+    checkpoint: PathBuf,
     send: bool,
+    resume: bool,
+    force: bool,
+    test_send: bool,
     title: String,
 }
 
@@ -107,13 +112,19 @@ impl Default for NewsConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_NEWS_OUTPUT_JSON)),
             ntfy_topic: env::var("NTFY_TOPIC").unwrap_or_else(|_| DEFAULT_NTFY_TOPIC.to_owned()),
+            checkpoint: env::var_os("AI_NEWS_CHECKPOINT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_NEWS_CHECKPOINT)),
             send: env_bool("AI_NEWS_SEND"),
+            resume: env_bool("AI_NEWS_RESUME"),
+            force: env_bool("AI_NEWS_FORCE"),
+            test_send: env_bool("AI_NEWS_TEST_SEND"),
             title: env::var("AI_NEWS_TITLE").unwrap_or_else(|_| "AI 每日新聞洞察".to_owned()),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct NewsItem {
     title: String,
     url: String,
@@ -122,7 +133,7 @@ struct NewsItem {
     summary: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DigestDocument {
     title: String,
     generated_at: String,
@@ -130,6 +141,56 @@ struct DigestDocument {
     sent: bool,
     items: Vec<NewsItem>,
     markdown: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WorkflowCheckpoint {
+    run_id: String,
+    step: String,
+    started_at: String,
+    updated_at: String,
+    ntfy_topic: String,
+    output_md: String,
+    output_json: String,
+    items: Vec<NewsItem>,
+    prompt: String,
+    insight: String,
+    markdown: String,
+    sent: bool,
+    error: Option<String>,
+}
+
+impl WorkflowCheckpoint {
+    fn new(config: &NewsConfig) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self {
+            run_id: Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+            step: "started".to_owned(),
+            started_at: now.clone(),
+            updated_at: now,
+            ntfy_topic: config.ntfy_topic.clone(),
+            output_md: config.output_md.display().to_string(),
+            output_json: config.output_json.display().to_string(),
+            items: Vec::new(),
+            prompt: String::new(),
+            insight: String::new(),
+            markdown: String::new(),
+            sent: false,
+            error: None,
+        }
+    }
+
+    fn mark(&mut self, step: &str) {
+        self.step = step.to_owned();
+        self.updated_at = Utc::now().to_rfc3339();
+        self.error = None;
+    }
+
+    fn fail(&mut self, error: &CliError) {
+        self.step = "failed".to_owned();
+        self.updated_at = Utc::now().to_rfc3339();
+        self.error = Some(error.to_string());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,33 +288,143 @@ fn run_infer(config: AppConfig) -> Result<u8, CliError> {
 }
 
 fn run_news(config: NewsConfig) -> Result<u8, CliError> {
-    if config.llama.dry_run {
-        print_news_dry_run(&config);
-        write_digest_files(&dry_run_digest(&config), &config)?;
-        return Ok(0);
+    let mut checkpoint = load_or_new_checkpoint(&config)?;
+
+    let result = if config.test_send {
+        run_news_test_send(&config, &mut checkpoint)
+    } else if config.llama.dry_run {
+        run_news_dry_run(&config, &mut checkpoint)
+    } else {
+        run_news_pipeline(&config, &mut checkpoint)
+    };
+
+    if let Err(err) = &result {
+        checkpoint.fail(err);
+        let _ = write_checkpoint(&config, &checkpoint);
     }
 
-    validate_news(&config)?;
-    let items = collect_news(&config)?;
-    let prompt = build_digest_prompt(&items, Utc::now());
-    let insight = generate_llama_text(&config.llama, prompt)?;
-    let markdown = render_digest_markdown(&config.title, Utc::now(), &items, &insight);
+    result
+}
+
+fn run_news_dry_run(
+    config: &NewsConfig,
+    checkpoint: &mut WorkflowCheckpoint,
+) -> Result<u8, CliError> {
+    print_news_dry_run(config);
+    let document = dry_run_digest(config);
+    checkpoint.items = document.items.clone();
+    checkpoint.prompt = build_digest_prompt(&checkpoint.items, Utc::now());
+    checkpoint.insight = "dry-run insight".to_owned();
+    checkpoint.markdown = document.markdown.clone();
+    checkpoint.sent = false;
+    checkpoint.mark("dry_run");
+    write_digest_files(&document, config)?;
+    write_checkpoint(config, checkpoint)?;
+    println!("wrote dry-run digest to {}", config.output_md.display());
+    println!("checkpoint: {}", config.checkpoint.display());
+    Ok(0)
+}
+
+fn run_news_test_send(
+    config: &NewsConfig,
+    checkpoint: &mut WorkflowCheckpoint,
+) -> Result<u8, CliError> {
+    let mut document = dry_run_digest(config);
+    document.markdown = format!(
+        "# {}\n\n這是一則功能確認測試通知。\n\n{}",
+        config.title, document.markdown
+    );
+    publish_ntfy(
+        &config.ntfy_topic,
+        &format!("{}｜功能確認", config.title),
+        &document.markdown,
+    )?;
+    document.sent = true;
+    checkpoint.items = document.items.clone();
+    checkpoint.markdown = document.markdown.clone();
+    checkpoint.sent = true;
+    checkpoint.mark("test_sent");
+    write_digest_files(&document, config)?;
+    write_checkpoint(config, checkpoint)?;
+    println!("sent test digest to {}", config.ntfy_topic);
+    println!("checkpoint: {}", config.checkpoint.display());
+    Ok(0)
+}
+
+fn run_news_pipeline(
+    config: &NewsConfig,
+    checkpoint: &mut WorkflowCheckpoint,
+) -> Result<u8, CliError> {
+    validate_news(config)?;
+    write_checkpoint(config, checkpoint)?;
+
+    if checkpoint.items.is_empty() {
+        checkpoint.items = collect_news(config)?;
+        checkpoint.mark("collected");
+        write_checkpoint(config, checkpoint)?;
+    } else {
+        println!(
+            "resume: using {} checkpointed news items",
+            checkpoint.items.len()
+        );
+    }
+
+    if checkpoint.prompt.trim().is_empty() {
+        checkpoint.prompt = build_digest_prompt(&checkpoint.items, Utc::now());
+        checkpoint.mark("prompted");
+        write_checkpoint(config, checkpoint)?;
+    }
+
+    if checkpoint.insight.trim().is_empty() {
+        checkpoint.insight = generate_llama_text(&config.llama, checkpoint.prompt.clone())?;
+        checkpoint.mark("generated");
+        write_checkpoint(config, checkpoint)?;
+    } else {
+        println!("resume: using checkpointed Gemma insight");
+    }
+
+    if checkpoint.markdown.trim().is_empty() {
+        checkpoint.markdown = render_digest_markdown(
+            &config.title,
+            Utc::now(),
+            &checkpoint.items,
+            &checkpoint.insight,
+        );
+        checkpoint.mark("rendered");
+        write_checkpoint(config, checkpoint)?;
+    }
+
     let mut document = DigestDocument {
         title: config.title.clone(),
         generated_at: Utc::now().to_rfc3339(),
         ntfy_topic: config.ntfy_topic.clone(),
-        sent: false,
-        items,
-        markdown,
+        sent: checkpoint.sent,
+        items: checkpoint.items.clone(),
+        markdown: checkpoint.markdown.clone(),
     };
 
-    if config.send {
+    write_digest_files(&document, config)?;
+    checkpoint.mark("written");
+    write_checkpoint(config, checkpoint)?;
+
+    if config.send && !checkpoint.sent {
         publish_ntfy(&config.ntfy_topic, &config.title, &document.markdown)?;
+        checkpoint.sent = true;
         document.sent = true;
+        checkpoint.mark("sent");
+        write_digest_files(&document, config)?;
+        write_checkpoint(config, checkpoint)?;
+    } else if config.send {
+        println!(
+            "resume: checkpoint already sent to {}; not sending again",
+            config.ntfy_topic
+        );
     }
 
-    write_digest_files(&document, &config)?;
+    checkpoint.mark("completed");
+    write_checkpoint(config, checkpoint)?;
     println!("wrote {}", config.output_md.display());
+    println!("checkpoint: {}", config.checkpoint.display());
     if document.sent {
         println!("sent digest to {}", config.ntfy_topic);
     } else {
@@ -262,7 +433,6 @@ fn run_news(config: NewsConfig) -> Result<u8, CliError> {
 
     Ok(0)
 }
-
 fn parse_args(args: Vec<OsString>) -> Result<AppConfig, CliError> {
     let mut config = AppConfig::default();
     parse_infer_flags(args, &mut config)?;
@@ -295,6 +465,12 @@ fn parse_news_args(args: Vec<OsString>) -> Result<NewsConfig, CliError> {
                 config.output_json = PathBuf::from(next_value("--output-json", &mut iter)?);
             }
             "--ntfy-topic" => config.ntfy_topic = next_string("--ntfy-topic", &mut iter)?,
+            "--checkpoint" => {
+                config.checkpoint = PathBuf::from(next_value("--checkpoint", &mut iter)?)
+            }
+            "--resume" => config.resume = true,
+            "--force" => config.force = true,
+            "--test-send" => config.test_send = true,
             "--send" => config.send = true,
             "--no-send" => config.send = false,
             "--title" => config.title = next_string("--title", &mut iter)?,
@@ -623,6 +799,32 @@ fn write_text_file(path: &Path, contents: &str) -> Result<(), CliError> {
     fs::write(path, contents).map_err(|err| CliError::Io(err.to_string()))
 }
 
+fn load_or_new_checkpoint(config: &NewsConfig) -> Result<WorkflowCheckpoint, CliError> {
+    if config.force || !config.resume || !config.checkpoint.is_file() {
+        return Ok(WorkflowCheckpoint::new(config));
+    }
+
+    let contents =
+        fs::read_to_string(&config.checkpoint).map_err(|err| CliError::Io(err.to_string()))?;
+    let mut checkpoint: WorkflowCheckpoint =
+        serde_json::from_str(&contents).map_err(|err| CliError::Json(err.to_string()))?;
+    checkpoint.ntfy_topic = config.ntfy_topic.clone();
+    checkpoint.output_md = config.output_md.display().to_string();
+    checkpoint.output_json = config.output_json.display().to_string();
+    println!(
+        "resume: loaded checkpoint {} at step {}",
+        config.checkpoint.display(),
+        checkpoint.step
+    );
+    Ok(checkpoint)
+}
+
+fn write_checkpoint(config: &NewsConfig, checkpoint: &WorkflowCheckpoint) -> Result<(), CliError> {
+    let json =
+        serde_json::to_string_pretty(checkpoint).map_err(|err| CliError::Json(err.to_string()))?;
+    write_text_file(&config.checkpoint, &json)
+}
+
 fn dry_run_digest(config: &NewsConfig) -> DigestDocument {
     let items = sample_news_items();
     let insight = "- Dry run：這是一份範例洞察，不會抓取 RSS、不會執行 llama-cli、不會發送 ntfy。\n- 正式排程會收集 AI RSS，交給 Gemma 4 E4B Q4_K_M GGUF 產出繁體中文洞察。\n- 使用 --send 或 AI_NEWS_SEND=1 才會推送到 ntfy。";
@@ -783,8 +985,8 @@ fn print_help() {
         "Rust + llama-cli + Gemma 4 E4B GGUF Q4_K_M AI news example\n\n\
 Usage:\n  cargo run -- [infer-options] [-- llama-cli-extra-args...]\n  cargo run -- news [news-options] [infer-options] [-- llama-cli-extra-args...]\n\n\
 Infer options:\n  --llama-cli <path>        Path to llama-cli (or LLAMA_CLI)\n  -m, --model <path>        Path to Gemma 4 E4B Q4_K_M GGUF (or GEMMA4_GGUF)\n  -p, --prompt <text>       Prompt text (or PROMPT)\n  --system-prompt <text>    System prompt (or SYSTEM_PROMPT)\n  --no-system-prompt        Do not send a system prompt\n  -c, --ctx-size <tokens>   Context size\n  -n, --predict <tokens>    Tokens to generate (default: 256; news default: 900)\n  --temp <value>            Temperature (default: 0.7; news default: 0.35)\n  --top-p <value>           Top-p (default: 0.95; news default: 0.9)\n  -t, --threads <count>     CPU thread count\n  -ngl, --gpu-layers <n>    Layers to offload to GPU\n  --dry-run                 Print command/plan without running network or model work\n  --allow-missing-model     Skip model-file validation\n\n\
-News options:\n  --feed <url>              Add an RSS/Atom source\n  --clear-feeds             Remove default feeds before adding custom feeds\n  --max-items <n>           Maximum headlines to summarize (default: 12)\n  --days <n>                Include items from recent days (default: 2)\n  --output-md <path>        Markdown digest output (default: data/ai-news/latest.md)\n  --output-json <path>      JSON output for React (default: web/public/latest-news.example.json)\n  --ntfy-topic <url>        ntfy topic URL (default: https://ntfy.sh/wangsc_ainews)\n  --send                    Publish digest to ntfy after generation\n  --no-send                 Do not publish to ntfy\n  --title <text>            Digest title\n  -h, --help                Show this help\n\n\
-Examples:\n  cargo run -- --model models/gemma4-e4b-it-Q4_K_M.gguf --prompt \"你好\" -- -fa on\n  cargo run -- news --dry-run\n  cargo run -- news --send --gpu-layers 99"
+News options:\n  --feed <url>              Add an RSS/Atom source\n  --clear-feeds             Remove default feeds before adding custom feeds\n  --max-items <n>           Maximum headlines to summarize (default: 12)\n  --days <n>                Include items from recent days (default: 2)\n  --output-md <path>        Markdown digest output (default: data/ai-news/latest.md)\n  --output-json <path>      JSON output for React (default: web/public/latest-news.example.json)\n  --checkpoint <path>       Resume checkpoint path (default: data/ai-news/checkpoint.json)\n  --resume                  Continue from checkpoint and avoid duplicate ntfy sends\n  --force                   Ignore checkpoint and start a fresh workflow\n  --test-send               Send a sample digest to ntfy without RSS/model work\n  --ntfy-topic <url>        ntfy topic URL (default: https://ntfy.sh/wangsc_ainews)\n  --send                    Publish digest to ntfy after generation\n  --no-send                 Do not publish to ntfy\n  --title <text>            Digest title\n  -h, --help                Show this help\n\n\
+Examples:\n  cargo run -- --model models/gemma4-e4b-it-Q4_K_M.gguf --prompt \"你好\" -- -fa on\n  cargo run -- news --dry-run\n  cargo run -- news --test-send\n  cargo run -- news --resume --send --gpu-layers 99"
     );
 }
 
@@ -878,6 +1080,10 @@ mod tests {
             "--send",
             "--ntfy-topic",
             "https://ntfy.sh/wangsc_ainews",
+            "--checkpoint",
+            "data/test-checkpoint.json",
+            "--resume",
+            "--test-send",
             "--dry-run",
             "--",
             "--seed",
@@ -889,6 +1095,12 @@ mod tests {
         assert_eq!(config.max_items, 5);
         assert_eq!(config.days, 3);
         assert!(config.send);
+        assert!(config.resume);
+        assert!(config.test_send);
+        assert_eq!(
+            config.checkpoint,
+            PathBuf::from("data/test-checkpoint.json")
+        );
         assert!(config.llama.dry_run);
         assert_eq!(config.llama.extra_args, os_args(&["--seed", "7"]));
     }
@@ -917,6 +1129,27 @@ mod tests {
         assert!(prompt.contains("AI 每日新聞洞察"));
         assert!(prompt.contains("不要捏造"));
         assert!(prompt.contains("新模型發布"));
+    }
+
+    #[test]
+    fn checkpoint_tracks_failure_and_step_progress() {
+        let config = NewsConfig {
+            checkpoint: PathBuf::from("data/test-checkpoint.json"),
+            ..Default::default()
+        };
+        let mut checkpoint = WorkflowCheckpoint::new(&config);
+
+        checkpoint.items = sample_news_items();
+        checkpoint.mark("collected");
+        assert_eq!(checkpoint.step, "collected");
+        assert!(checkpoint.error.is_none());
+
+        checkpoint.fail(&CliError::NoNews);
+        assert_eq!(checkpoint.step, "failed");
+        assert_eq!(
+            checkpoint.error,
+            Some("no AI news items found in the configured feeds".to_owned())
+        );
     }
 
     #[test]

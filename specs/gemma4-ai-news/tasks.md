@@ -8,4 +8,6 @@
 - [x] 新增 dry-run 示範資料流程。
 - [x] 新增 React + Vite dashboard。
 - [x] 新增每日執行與 cron 安裝腳本。
+- [x] 新增 `--test-send` 功能確認通知。
+- [x] 新增 checkpoint/resume/force 斷點閉環。
 - [x] 更新 README 與 Spec Kit 文件。

@@ -16,8 +16,9 @@
 4. 呼叫 `llama-cli --jinja --single-turn` 搭配 Gemma 4 E4B Q4_K_M GGUF 產生洞察。
 5. 輸出 Markdown 與 JSON。
 6. 使用 `--send` 時 POST 到 ntfy topic。
-7. React dashboard 讀取 JSON 顯示摘要與來源。
+7. 每個階段寫入 `data/ai-news/checkpoint.json`，支援 `--resume` 續跑、`--force` 重跑與避免重複 ntfy 發送。
+8. React dashboard 讀取 JSON 顯示摘要與來源。
 
 ## 排程
 
-`./scripts/install_daily_cron.sh` 安裝每日 cron，預設每天 08:15 執行 `./scripts/run_daily_news.sh`。
+`./scripts/install_daily_cron.sh` 安裝每日 cron，預設每天 08:15 執行 `./scripts/run_daily_news.sh`。每日腳本預設使用 `--resume`，中斷後可接續。
